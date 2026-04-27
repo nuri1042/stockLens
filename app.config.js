@@ -19,23 +19,18 @@ function loadEnvFile(fileName) {
     ) {
       val = val.slice(1, -1);
     }
-    // 프로젝트 env 파일 값이 우선 (동일 키는 나중 파일이 덮어씀)
     process.env[key] = val;
   }
 }
 
 module.exports = ({ config }) => {
   loadEnvFile('.env');
-  loadEnvFile('env'); // env 가 있으면 같은 키는 여기 값으로 덮어씀
+  loadEnvFile('env');
   return {
     ...config,
-    expo: {
-      ...config.expo,
-      extra: {
-        ...(config.expo?.extra ?? {}),
-        finnhubApiKey: process.env.EXPO_PUBLIC_FINNHUB_API_KEY ?? '',
-        polygonApiKey: process.env.EXPO_PUBLIC_POLYGON_API_KEY ?? '',
-      },
+    extra: {
+      ...(config.extra ?? {}),
+      kisProxyUrl: process.env.EXPO_PUBLIC_KIS_PROXY_URL ?? '',
     },
   };
 };

@@ -56,36 +56,18 @@ function stringFromExtra(extra: Record<string, unknown>, key: string): string {
   return typeof v === 'string' ? v.trim() : '';
 }
 
-/**
- * 개발: babel이 process.env.EXPO_PUBLIC_* → expo/virtual/env 로 바꿉니다.
- * 그 모듈은 `.env` 등만 합치므로 metro.config에서 `env`→`.env` 동기화가 필요합니다.
- */
-export function getFinnhubApiKey(): string {
+/** 프런트가 호출할 로컬 프록시 서버 URL */
+export function getKisProxyUrl(): string {
   const extra = readConfigExtra();
-  const fromExtra = stringFromExtra(extra, 'finnhubApiKey');
-  if (fromExtra.length > 0) {
-    return fromExtra;
-  }
+  const fromExtra = stringFromExtra(extra, 'kisProxyUrl');
+  if (fromExtra) return fromExtra.replace(/\/$/, '');
   const fromTree = findStringInTree(Constants.expoConfig, [
-    'finnhubApiKey',
-    'EXPO_PUBLIC_FINNHUB_API_KEY',
+    'kisProxyUrl',
+    'EXPO_PUBLIC_KIS_PROXY_URL',
   ]);
-  if (fromTree) return fromTree;
-  const fromEnv = process.env.EXPO_PUBLIC_FINNHUB_API_KEY;
-  return typeof fromEnv === 'string' ? fromEnv.trim() : '';
-}
-
-export function getPolygonApiKey(): string {
-  const extra = readConfigExtra();
-  const fromExtra = stringFromExtra(extra, 'polygonApiKey');
-  if (fromExtra.length > 0) {
-    return fromExtra;
-  }
-  const fromTree = findStringInTree(Constants.expoConfig, [
-    'polygonApiKey',
-    'EXPO_PUBLIC_POLYGON_API_KEY',
-  ]);
-  if (fromTree) return fromTree;
-  const fromEnv = process.env.EXPO_PUBLIC_POLYGON_API_KEY;
-  return typeof fromEnv === 'string' ? fromEnv.trim() : '';
+  if (fromTree) return fromTree.replace(/\/$/, '');
+  const fromEnv = process.env.EXPO_PUBLIC_KIS_PROXY_URL;
+  return typeof fromEnv === 'string' && fromEnv.trim()
+    ? fromEnv.trim().replace(/\/$/, '')
+    : 'http://localhost:8787';
 }

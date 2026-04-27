@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  GestureResponderEvent,
   Modal,
   Pressable,
   RefreshControl,
@@ -14,36 +15,39 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { LIQUID_US_SYMBOLS } from '@/constants/liquidUniverse';
 import { formatPrice, formatVolume } from '@/lib/format';
 import {
-  FINNHUB_MARKET_RANKING_TOP,
-  FinnhubApiError,
-  enrichStockRankingRowNames,
-  fetchFinnhubMarketUniverse,
+  KisApiError,
+  KIS_VOLUME_RANK_MAX,
+  fetchDomesticVolumeRank,
   pickTopPlunge,
   pickTopSurge,
+  hasKisCredentials,
   type StockRankingRow,
-} from '@/lib/finnhub';
-import { getFinnhubApiKey } from '@/lib/env';
+} from '@/lib/kis';
+import { getFavoriteSymbols, toggleFavoriteSymbol } from '@/lib/favorites';
 import { useThemeColor } from '@/hooks/useThemeColor';
 
-type MomentumFilter = 'surge' | 'plunge';
+type MomentumFilter = 'volume' | 'surge' | 'plunge';
 
-const LIST_LIMIT = FINNHUB_MARKET_RANKING_TOP;
+const LIST_LIMIT = KIS_VOLUME_RANK_MAX;
+const PAGE_SIZE = 10;
 
 const FILTER_LABELS: Record<MomentumFilter, string> = {
+  volume: '거래량순',
   surge: '급상승',
   plunge: '급하락',
 };
 
 export default function VolumeLeadersScreen() {
   const [rawRows, setRawRows] = useState<StockRankingRow[]>([]);
-  const [momentumFilter, setMomentumFilter] = useState<MomentumFilter>('surge');
+  const [momentumFilter, setMomentumFilter] = useState<MomentumFilter>('volume');
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [favoriteSymbols, setFavoriteSymbols] = useState<string[]>([]);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const didAutoLoadRef = useRef(false);
 
   const borderColor = useThemeColor({ light: '#E5E7EB', dark: '#2C2C2E' }, 'icon');
@@ -53,16 +57,21 @@ export default function VolumeLeadersScreen() {
   const cardBg = useThemeColor({}, 'background');
 
   const rows = useMemo(() => {
+    if (momentumFilter === 'volume') {
+      return rawRows.slice(0, LIST_LIMIT);
+    }
     if (momentumFilter === 'surge') {
       return pickTopSurge(rawRows, LIST_LIMIT);
     }
     return pickTopPlunge(rawRows, LIST_LIMIT);
   }, [rawRows, momentumFilter]);
+  const visibleRows = useMemo(() => rows.slice(0, visibleCount), [rows, visibleCount]);
+  const canLoadMore = visibleRows.length < rows.length;
 
   const load = useCallback(async (isRefresh: boolean) => {
-    if (!getFinnhubApiKey()) {
+    if (!hasKisCredentials()) {
       setError(
-        'EXPO_PUBLIC_FINNHUB_API_KEY가 없습니다. env / .env를 확인한 뒤 Metro를 재시작하세요.'
+        'EXPO_PUBLIC_KIS_APP_KEY / EXPO_PUBLIC_KIS_APP_SECRET이 없습니다. .env를 확인한 뒤 Metro를 재시작하세요.'
       );
       setRawRows([]);
       setLoading(false);
@@ -76,19 +85,11 @@ export default function VolumeLeadersScreen() {
     }
     setError(null);
     try {
-      const universe = await fetchFinnhubMarketUniverse(LIQUID_US_SYMBOLS);
-      const surge = pickTopSurge(universe, LIST_LIMIT);
-      const plunge = pickTopPlunge(universe, LIST_LIMIT);
-      const enrichKeys = new Set<string>();
-      for (const r of surge) enrichKeys.add(r.symbol);
-      for (const r of plunge) enrichKeys.add(r.symbol);
-      await enrichStockRankingRowNames(
-        [...enrichKeys].map((s) => universe.find((u) => u.symbol === s)!)
-      );
-      setRawRows(universe);
+      const ranked = await fetchDomesticVolumeRank();
+      setRawRows(ranked);
+      setVisibleCount(PAGE_SIZE);
     } catch (e) {
-      const msg =
-        e instanceof FinnhubApiError ? e.message : '데이터를 불러오지 못했습니다.';
+      const msg = e instanceof KisApiError ? e.message : '데이터를 불러오지 못했습니다.';
       setError(msg);
       setRawRows([]);
     } finally {
@@ -97,23 +98,41 @@ export default function VolumeLeadersScreen() {
     }
   }, []);
 
+  const loadFavorites = useCallback(async () => {
+    const favorites = await getFavoriteSymbols();
+    setFavoriteSymbols(favorites);
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       if (didAutoLoadRef.current) {
+        void loadFavorites();
         return;
       }
       didAutoLoadRef.current = true;
+      void loadFavorites();
       void load(false);
-    }, [load])
+    }, [load, loadFavorites])
   );
 
   const selectFilter = (next: MomentumFilter) => {
     setMomentumFilter(next);
     setDropdownOpen(false);
+    setVisibleCount(PAGE_SIZE);
   };
 
-  const renderItem = ({ item }: { item: StockRankingRow }) => {
+  const onLoadMore = () => {
+    setVisibleCount((prev) => Math.min(prev + PAGE_SIZE, rows.length));
+  };
+
+  const onToggleFavorite = useCallback(async (symbol: string) => {
+    const next = await toggleFavoriteSymbol(symbol);
+    setFavoriteSymbols(next);
+  }, []);
+
+  const renderItem = ({ item, index }: { item: StockRankingRow; index: number }) => {
     const up = item.changePercent >= 0;
+    const isFavorite = favoriteSymbols.includes(item.symbol);
     return (
       <Pressable
         accessibilityRole="button"
@@ -125,33 +144,48 @@ export default function VolumeLeadersScreen() {
           })
         }
         style={({ pressed }) => [
-          styles.row,
-          { borderColor: rowBorder },
+          styles.tableRow,
+          { borderBottomColor: rowBorder },
           pressed && styles.rowPressed,
         ]}>
-        <View style={styles.rowMain}>
-          <ThemedText type="defaultSemiBold" style={styles.symbol}>
-            {item.symbol}
+        <View style={styles.colStock}>
+          <View style={styles.rankWrap}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                isFavorite ? `${item.symbol} 즐겨찾기 해제` : `${item.symbol} 즐겨찾기 추가`
+              }
+              hitSlop={8}
+              onPress={(e: GestureResponderEvent) => {
+                e.stopPropagation();
+                void onToggleFavorite(item.symbol);
+              }}
+              style={styles.starButton}>
+              <Ionicons name={isFavorite ? 'star' : 'star-outline'} size={16} color={tint} />
+            </Pressable>
+            <ThemedText style={styles.rankText}>{index + 1}</ThemedText>
+          </View>
+          <ThemedText type="defaultSemiBold" style={styles.symbol} numberOfLines={1}>
+            {item.name !== item.symbol ? item.name : item.symbol}
           </ThemedText>
-          {item.name !== item.symbol ? (
-            <ThemedText style={[styles.name, { color: muted }]} numberOfLines={1}>
-              {item.name}
-            </ThemedText>
-          ) : null}
         </View>
-        <View style={styles.rowRight}>
+        <View style={styles.colPrice}>
+          <ThemedText type="defaultSemiBold" style={styles.price}>
+            {formatPrice(item.price)}
+          </ThemedText>
+        </View>
+        <View style={styles.colChange}>
+          <ThemedText style={[styles.pct, { color: up ? '#d12b4f' : '#1a7f37' }]}>
+            {up ? '+' : ''}
+            {item.changePercent.toFixed(2)}%
+          </ThemedText>
+        </View>
+        <View style={styles.colVolume}>
           <ThemedText type="defaultSemiBold" style={styles.vol}>
             {formatVolume(item.volume)}
           </ThemedText>
           <ThemedText style={[styles.volLabel, { color: muted }]}>
             거래량
-          </ThemedText>
-          <ThemedText type="defaultSemiBold" style={styles.price}>
-            ${formatPrice(item.price)}
-          </ThemedText>
-          <ThemedText style={[styles.pct, { color: up ? '#1a7f37' : '#cf222e' }]}>
-            {up ? '+' : ''}
-            {item.changePercent.toFixed(2)}%
           </ThemedText>
         </View>
       </Pressable>
@@ -168,14 +202,14 @@ export default function VolumeLeadersScreen() {
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="등락 필터"
+            accessibilityLabel="순위 보기 필터"
             onPress={() => setDropdownOpen(true)}
             style={[
               styles.dropdownTrigger,
               { borderColor: rowBorder, backgroundColor: cardBg },
             ]}>
             <ThemedText type="defaultSemiBold" style={styles.dropdownTriggerText}>
-              등락률 · {FILTER_LABELS[momentumFilter]}
+              보기 · {FILTER_LABELS[momentumFilter]}
             </ThemedText>
             <Ionicons name="chevron-down" size={20} color={muted} />
           </Pressable>
@@ -196,7 +230,7 @@ export default function VolumeLeadersScreen() {
                 <ThemedText type="defaultSemiBold" style={[styles.modalTitle, { color: muted }]}>
                   보기
                 </ThemedText>
-                {(['surge', 'plunge'] as const).map((key) => (
+                {(['volume', 'surge', 'plunge'] as const).map((key) => (
                   <Pressable
                     key={key}
                     onPress={() => selectFilter(key)}
@@ -233,24 +267,48 @@ export default function VolumeLeadersScreen() {
             <ActivityIndicator size="large" color={tint} />
           </View>
         ) : (
-          <FlatList
-            data={rows}
-            keyExtractor={(item) => item.symbol}
-            renderItem={renderItem}
-            contentContainerStyle={styles.listContent}
-            ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-            showsVerticalScrollIndicator={false}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={tint} />
-            }
-            ListEmptyComponent={
-              <ThemedText style={[styles.hint, { color: muted, textAlign: 'center', marginTop: 24 }]}>
-                {momentumFilter === 'surge'
-                  ? '등락률이 플러스인 종목이 없습니다.'
-                  : '등락률이 마이너스인 종목이 없습니다.'}
-              </ThemedText>
-            }
-          />
+          <View style={styles.tableWrap}>
+            <View style={[styles.tableHeader, { borderBottomColor: rowBorder }]}>
+              <View style={styles.colStock}>
+                <ThemedText style={styles.headText}>순위 · 종목</ThemedText>
+              </View>
+              <View style={styles.colPrice}>
+                <ThemedText style={styles.headText}>현재가</ThemedText>
+              </View>
+              <View style={styles.colChange}>
+                <ThemedText style={styles.headText}>등락률</ThemedText>
+              </View>
+              <View style={styles.colVolume}>
+                <ThemedText style={styles.headText}>거래량</ThemedText>
+              </View>
+            </View>
+            <FlatList
+              data={visibleRows}
+              keyExtractor={(item) => item.symbol}
+              renderItem={renderItem}
+              contentContainerStyle={styles.listContent}
+              showsVerticalScrollIndicator={false}
+              refreshControl={
+                <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={tint} />
+              }
+              ListEmptyComponent={
+                <ThemedText style={[styles.hint, { color: muted, textAlign: 'center', marginTop: 24 }]}>
+                  {momentumFilter === 'volume'
+                    ? '거래량 순위 데이터가 없습니다.'
+                    : momentumFilter === 'surge'
+                      ? '등락률이 플러스인 종목이 없습니다.'
+                      : '등락률이 마이너스인 종목이 없습니다.'}
+                </ThemedText>
+              }
+              ListFooterComponent={
+                canLoadMore ? (
+                  <Pressable onPress={onLoadMore} style={[styles.moreButton, { borderColor: tint }]}>
+                    <ThemedText style={{ color: tint }}>더보기</ThemedText>
+                  </Pressable>
+                ) : null
+              }
+            />
+          </View>
         )}
       </SafeAreaView>
     </ThemedView>
@@ -320,52 +378,84 @@ const styles = StyleSheet.create({
     fontSize: 17,
   },
   listContent: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
+    paddingHorizontal: 0,
+    paddingTop: 0,
     paddingBottom: 100,
   },
-  row: {
+  tableWrap: {
+    flex: 1,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+  },
+  tableHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 8,
+    paddingBottom: 10,
+    marginBottom: 2,
+  },
+  headText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  tableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
   },
   rowPressed: {
     opacity: 0.85,
   },
-  rowMain: {
-    flex: 1,
-    marginRight: 12,
-    gap: 4,
-    maxWidth: '52%',
+  colStock: {
+    flex: 2.4,
+    paddingRight: 6,
+  },
+  colPrice: {
+    flex: 1.3,
+    alignItems: 'flex-end',
+  },
+  colChange: {
+    flex: 1.1,
+    alignItems: 'flex-end',
+  },
+  colVolume: {
+    flex: 1.3,
+    alignItems: 'flex-end',
+  },
+  rankWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    gap: 6,
+  },
+  rankText: {
+    fontSize: 12,
+    opacity: 0.8,
   },
   symbol: {
-    fontSize: 17,
-    letterSpacing: 0.3,
+    fontSize: 15,
   },
   name: {
     fontSize: 13,
   },
-  rowRight: {
-    alignItems: 'flex-end',
-    gap: 2,
+  starButton: {
+    padding: 0,
   },
   vol: {
-    fontSize: 16,
+    fontSize: 13,
   },
   volLabel: {
-    fontSize: 11,
+    fontSize: 10,
     opacity: 0.7,
-    marginBottom: 4,
   },
   price: {
-    fontSize: 15,
+    fontSize: 14,
   },
   pct: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
   center: {
@@ -389,5 +479,13 @@ const styles = StyleSheet.create({
   hint: {
     marginTop: 12,
     fontSize: 14,
+  },
+  moreButton: {
+    marginTop: 14,
+    alignSelf: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });

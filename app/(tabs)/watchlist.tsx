@@ -1,5 +1,5 @@
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -12,18 +12,23 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { WATCHLIST_SYMBOLS, type WatchlistItem } from '@/constants/watchlist';
 import { formatPrice } from '@/lib/format';
-import { FinnhubApiError, fetchWatchlistRows } from '@/lib/finnhub';
-import { getFinnhubApiKey } from '@/lib/env';
+import { getFavoriteSymbols } from '@/lib/favorites';
+import { KisApiError, fetchWatchlistRows, hasKisCredentials } from '@/lib/kis';
 import { useThemeColor } from '@/hooks/useThemeColor';
 
 export default function WatchlistScreen() {
-  const [rows, setRows] = useState<WatchlistItem[]>([]);
+  const [rows, setRows] = useState<
+    {
+      symbol: string;
+      name: string;
+      price: number;
+      changePercent: number;
+    }[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const didAutoLoadRef = useRef(false);
 
   const borderColor = useThemeColor({ light: '#E5E7EB', dark: '#2C2C2E' }, 'icon');
   const rowBorder = useThemeColor({ light: '#E5E7EB', dark: '#38383A' }, 'icon');
@@ -31,8 +36,8 @@ export default function WatchlistScreen() {
   const tint = useThemeColor({}, 'tint');
 
   const load = useCallback(async (isRefresh: boolean) => {
-    if (!getFinnhubApiKey()) {
-      setError('EXPO_PUBLIC_FINNHUB_API_KEY가 없습니다.');
+    if (!hasKisCredentials()) {
+      setError('EXPO_PUBLIC_KIS_APP_KEY / EXPO_PUBLIC_KIS_APP_SECRET이 없습니다.');
       setRows([]);
       setLoading(false);
       setRefreshing(false);
@@ -45,10 +50,15 @@ export default function WatchlistScreen() {
     }
     setError(null);
     try {
-      const data = await fetchWatchlistRows(WATCHLIST_SYMBOLS);
+      const favorites = await getFavoriteSymbols();
+      if (favorites.length === 0) {
+        setRows([]);
+        return;
+      }
+      const data = await fetchWatchlistRows(favorites);
       setRows(data);
     } catch (e) {
-      const msg = e instanceof FinnhubApiError ? e.message : '데이터를 불러오지 못했습니다.';
+      const msg = e instanceof KisApiError ? e.message : '데이터를 불러오지 못했습니다.';
       setError(msg);
       setRows([]);
     } finally {
@@ -59,15 +69,20 @@ export default function WatchlistScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (didAutoLoadRef.current) {
-        return;
-      }
-      didAutoLoadRef.current = true;
       void load(false);
     }, [load])
   );
 
-  const renderItem = ({ item }: { item: WatchlistItem }) => {
+  const renderItem = ({
+    item,
+  }: {
+    item: {
+      symbol: string;
+      name: string;
+      price: number;
+      changePercent: number;
+    };
+  }) => {
     const up = item.changePercent >= 0;
     return (
       <Pressable
@@ -94,7 +109,7 @@ export default function WatchlistScreen() {
         </View>
         <View style={styles.rowRight}>
           <ThemedText type="defaultSemiBold" style={styles.price}>
-            ${formatPrice(item.price)}
+            ₩{formatPrice(item.price)}
           </ThemedText>
           <ThemedText style={[styles.pct, { color: up ? '#1a7f37' : '#cf222e' }]}>
             {up ? '+' : ''}
@@ -136,6 +151,16 @@ export default function WatchlistScreen() {
             showsVerticalScrollIndicator={false}
             refreshControl={
               <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={tint} />
+            }
+            ListEmptyComponent={
+              <View style={styles.emptyWrap}>
+                <ThemedText style={[styles.hint, { color: muted, textAlign: 'center' }]}>
+                  아직 관심종목이 없습니다.
+                </ThemedText>
+                <ThemedText style={[styles.hint, { color: muted, textAlign: 'center' }]}>
+                  인기 급상승 탭에서 별표를 눌러 추가해보세요.
+                </ThemedText>
+              </View>
             }
           />
         )}
@@ -227,5 +252,10 @@ const styles = StyleSheet.create({
   hint: {
     marginTop: 12,
     fontSize: 14,
+  },
+  emptyWrap: {
+    marginTop: 28,
+    alignItems: 'center',
+    gap: 2,
   },
 });

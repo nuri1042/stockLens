@@ -6,8 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { formatPrice } from '@/lib/format';
-import { FinnhubApiError, fetchProfile, fetchQuote, type FinnhubQuote } from '@/lib/finnhub';
-import { getFinnhubApiKey } from '@/lib/env';
+import { KisApiError, fetchDomesticInquirePrice, hasKisCredentials } from '@/lib/kis';
 import { useThemeColor } from '@/hooks/useThemeColor';
 
 export default function StockChartScreen() {
@@ -15,7 +14,10 @@ export default function StockChartScreen() {
   const symbol = (Array.isArray(raw) ? raw[0] : raw) ?? '';
   const upper = symbol.toUpperCase();
 
-  const [quote, setQuote] = useState<FinnhubQuote | null>(null);
+  const [quote, setQuote] = useState<{
+    price: number;
+    changePercent: number;
+  } | null>(null);
   const [name, setName] = useState<string>(upper);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -29,19 +31,25 @@ export default function StockChartScreen() {
       setLoading(false);
       return;
     }
-    if (!getFinnhubApiKey()) {
-      setErr('API 키가 없습니다.');
+    if (!hasKisCredentials()) {
+      setErr('EXPO_PUBLIC_KIS_APP_KEY / EXPO_PUBLIC_KIS_APP_SECRET이 없습니다.');
       setLoading(false);
       return;
     }
     setLoading(true);
     setErr(null);
     try {
-      const [q, p] = await Promise.all([fetchQuote(upper), fetchProfile(upper)]);
-      setQuote(q);
-      setName(p?.name ?? upper);
+      const row = await fetchDomesticInquirePrice(upper);
+      if (!row) {
+        setQuote(null);
+        setName(upper);
+        setErr('시세를 찾을 수 없습니다.');
+        return;
+      }
+      setQuote({ price: row.price, changePercent: row.changePercent });
+      setName(row.name);
     } catch (e) {
-      setErr(e instanceof FinnhubApiError ? e.message : '불러오지 못했습니다.');
+      setErr(e instanceof KisApiError ? e.message : '불러오지 못했습니다.');
     } finally {
       setLoading(false);
     }
@@ -51,8 +59,8 @@ export default function StockChartScreen() {
     load();
   }, [load]);
 
-  const price = quote?.c && quote.c > 0 ? quote.c : quote?.pc ?? 0;
-  const changePct = quote?.dp ?? 0;
+  const price = quote && quote.price > 0 ? quote.price : 0;
+  const changePct = quote?.changePercent ?? 0;
   const up = changePct >= 0;
 
   return (
@@ -79,9 +87,9 @@ export default function StockChartScreen() {
               <ThemedText type="subtitle">{name}</ThemedText>
               <View style={styles.priceRow}>
                 <ThemedText type="title" style={styles.price}>
-                  {price > 0 ? `$${formatPrice(price)}` : '—'}
+                  {price > 0 ? `₩${formatPrice(price)}` : '—'}
                 </ThemedText>
-                {quote && quote.c > 0 ? (
+                {quote && quote.price > 0 ? (
                   <ThemedText
                     style={[
                       styles.change,
